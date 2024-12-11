@@ -1,7 +1,6 @@
 #include <nextion.h>
 #include <usart.h>
 #include <stdbool.h>
-#include <stdbool.h>
 #include <math.h>
 #include <avr/common.h>
 #include <avr/interrupt.h>
@@ -14,17 +13,17 @@
 // Make sure that the math.h defines will work
 #define _USE_MATH_DEFINES
 
-// So we wont mess them up :D
+// Redefines of the PWM counter registers
 #define PD5_DUTY OCR0A
 #define PD6_DUTY OCR0B
 
 // Constants for the wheel
-#define WHEEL_D (float)0.066               // Diameter in m
-#define WHEEL_CIRC (float)(M_PI * WHEEL_D)   // The circumference
-#define N_PULSES 64
+#define WHEEL_D (float)0.066                // Diameter in m
+#define WHEEL_CIRC (float)(M_PI * WHEEL_D)  // The circumference
+#define N_PULSES 64                         // n pulses for one encoder wheel rotation
 
 // Timer constants
-#define OCR1A_VAL (uint16_t)(F_CPU / 1000) - 1
+#define OCR1A_VAL (uint16_t)(F_CPU / 1000) - 1  // Calibrated to prescaler of 1, and to configure the timer to 1ms
 
 /*
 Project requirements:
@@ -49,54 +48,53 @@ Inidicate the state of the car on display
 float rpm_avg = 0;          // Average rpm
 float rpm_avg_counter = 0;  // Counter for calculating the average
 float current_rpm = 0;      // Current RPM (not precise)
-float current_speed = 0;    // Current speed calculated from the rpm_avg and the WHEEL_CIRC
-float current_accel = 0;    // Current acceleration TODO
+float current_speed = 0;    // Current speed
+float delta_speed = 0;      // For calculating acceleration
+float current_accel = 0;    // Current acceleration
 
-float current_target_dist = 0;// Target distance for this 'run'
-float current_dist = 0;       // Current distance the car has travelled
-float current_target_time = 0;// Target time for this 'run;
-float current_time = 0;       // Current time the car has taken
-uint64_t current_time_start = 0;
+float current_target_dist = 0;  // Target distance for this 'run'
+float current_dist = 0;         // Current distance the car has travelled
+float current_target_time = 0;  // Target time for this 'run'
+float current_time = 0;         // Current time the car has taken
+uint64_t current_time_start = 0;// Offset from the current_time for current 'run'
 
 uint16_t time[2] = {0, 0};  // Array for the two values of time required (so one for each 'run')
 uint16_t dist[2] = {0, 0};  // Array for the two distances to be travelled required (so one for each 'run')
 float req_spd = 0;          // Required speed for current 'run'
 float req_rpm = 0;          // Required rpm for current 'run'
 
-bool started = 0;
-bool done = 0;
-uint8_t n_run = 0;
+bool started = 0; // If 'run' started
+bool done = 0;    // If program is done
+uint8_t n_run = 0;// n of 'run'
 
 // PID variables
 
-float kp = 0.2;             // Proportional term
-// Fine control
-float ki = 0.000002;            // Integral term
-float kd = 0.0025;            // Derivation term
+float kp = 0.2;         // Proportional term
+float ki = 0.000002;    // Integral term
+float kd = 0.0025;      // Derivation term
 
 float pid_err = 0;      // Error calculated from the difference between rpm_avg and the req_rpm
 float pid_err_prev = 0; // Previous iteration error
 float pid_int = 0;      // Integral part of the PID
 float pid_der = 0;      // Derivation part of the PID
-int pid_pwm = 60;    // Initial PWM
-int current_pwm = 0;
+int pid_pwm = 60;       // Initial PWM
+int current_pwm = 0;    // Current PWM
 
 
-// Must be volatile, cuz compiler stoopid and could mess the variables up :PP
-volatile uint64_t dtime = 0;      // ms counter
-volatile uint64_t dtime_now = 0;
-volatile uint64_t update_timer = 0;
-volatile uint64_t rev_counter = 0;
-volatile uint64_t delta_rev_count = 0;
+// Must be volatile, so the compiler does not optimize these by accident
+volatile uint64_t dtime = 0;            // ms counter
+volatile uint64_t dtime_now = 0;        // So the functions work with the same time
+volatile uint64_t update_timer = 0;     // Timer for update
+volatile uint64_t rev_counter = 0;      // Total pulse count
+volatile uint64_t delta_rev_count = 0;  // Pulse count since the previous iteration
 
 
 // Gets data from display and stores them into global variables
 void get_time_dist(void) {
-  // Allocation of data buffer
   uint8_t* buff = nx_alloc_buff();
 
-  // First get time1
   // Ask for data
+  // First get time1
   size_t buff_size = nx_send_read(buff, "get setup.n_time1_disp.val");
   // Calculate the number from response
   time[0] = nx_check(buff, buff_size)[0];
@@ -118,7 +116,6 @@ void get_time_dist(void) {
   dist[1] = nx_check(buff, buff_size)[0];
   nx_clean_buff(buff, buff_size);
 
-  // Standard C stuff
   free(buff);
   buff = NULL;
 }
@@ -134,6 +131,7 @@ int read_analog(uint8_t chan) {
 }
 
 // Read the battery voltage
+// Might be wrong, not tested yet
 float read_vbat() {
   int adc = read_analog(0);
   int adc_vref = read_analog(0x0E);
@@ -172,7 +170,6 @@ void update_status() {
 
 
 // Function that sets up the variables to be used each 'run'
-// Will run twice (duh)
 void start_run() { 
   if (n_run > 1) {
     cli();
@@ -211,10 +208,10 @@ void start_run() {
 // Function that runs when the 'start' button on 'setup' page is pressed
 void start(uint8_t* buff, size_t buff_size) { 
   get_time_dist();
-
   start_run();
 }
 
+// Function to restart the avr and also the nextion
 void restart(uint8_t* buff, size_t buff_size) {
   nx_send("rest");
   wdt_enable(WDTO_500MS);
@@ -223,11 +220,7 @@ void restart(uint8_t* buff, size_t buff_size) {
 
 // Function to regulate the PWM signal to the motor driver to reach the desired rpm, hence the required speed
 void pid_regulate() {
-  //if (rpm_avg + 0.125 > req_rpm && req_rpm < rpm_avg - 0.125) {
-  //  return;
-  //}
   float interval = (float)(dtime_now - update_timer) / 1000;
-  //float interval = 0.001;
 
   pid_err = req_rpm - rpm_avg;
   pid_int += pid_err * interval;
@@ -235,8 +228,8 @@ void pid_regulate() {
 
   // Formula for PID
   pid_pwm += (int)((kp * pid_err) + (ki * pid_int) + (kd * pid_der));
-  // Prevent overflow
 
+  // Prevent overflow and set minimum value
   current_pwm = pid_pwm;
   if (current_pwm > 255)
     current_pwm = 255;
@@ -247,7 +240,7 @@ void pid_regulate() {
   pid_err_prev = pid_err;
 }
 
-float delta_speed = 0;
+// Update running variables
 void update_vars() {
   current_rpm = 60 * (rev_counter - delta_rev_count) / (float)(N_PULSES * ((dtime_now - update_timer) / 1000.0));
   rpm_avg = rpm_avg + ((current_rpm - rpm_avg) / ++rpm_avg_counter);
@@ -264,18 +257,18 @@ ISR(INT0_vect) {
   ++rev_counter;
 }
 
+// Interrupt that runs every 1ms and increases the ms counter dtime
 ISR(TIMER1_COMPA_vect) {
   ++dtime;
 }
 
 int main(void) {
-  // Initialization of library functionalities
+  // Initialization of libraries
   uart_init();
   io_redirect();
   nx_init();
 
-  // Initializaiton of registers
-
+  // Configuration of registers
   // PWM pins stetup
   DDRD |= (DDD1 << PD5) | (DDD1 << PD6);
   PORTD |= (1 << PD5) | (1 << PD6);
@@ -283,23 +276,18 @@ int main(void) {
   // PWM timer/counter setup
   TCCR0A |= (1 << COM0A1) | (1 << COM0B1);
   TCCR0A |= (1 << WGM01) | (1 << WGM00);
-  // TCCR0B |= (1 << CS01);
-  // Experimentally set the prescaler to 1, so theoretically there should be a better pwm resolution of 2047 instead of 255
   TCCR0B |= (1 << CS00);
-  OCR0A = 0; // PD5_DUTY
-  OCR0B = 0; // PD6_DUTY
+  PD5_DUTY = 0;
+  PD6_DUTY = 0;
 
   // 16 bit Timer1 used for generating the 1ms interrupt using the CRC mode
   TCCR1A = 0;
   TCCR1B |= (1 << CS10) | (1 << WGM12);
   TIMSK1 |= (1 << OCIE1A);
-
-  // Setting the compare registers to trigger the interrupt every 1ms and every 1s
   OCR1A = OCR1A_VAL;
  
   // Optical encoder data pin for external interrupt setup
   DDRD &= ~(1 << PD2);
-  //PORTD |= (1 << PD2); // Possibly don't want the pull-up resistor active, don't remember why tho
   EICRA |= (1 << ISC01);
   EIMSK |= (1 << INT0);
 
@@ -314,13 +302,13 @@ int main(void) {
   nx_on_release(0x05, 0x03, restart);
 
   // Main superloop
-  //volatile uint64_t val_update_timer = 0;
   while(!done) {
     if (!started) {
       nx_check(NULL, 0);
       continue;
     }
 
+    // Update every 250ms
     if (dtime - update_timer >= 250) {
       dtime_now = dtime;
       update_vars();
@@ -328,10 +316,12 @@ int main(void) {
       update_timer = dtime;
     }
 
+    // Update status constantly
     current_time = (dtime - current_time_start) / 1000.0;
     update_status();
 
-    if (dtime - current_time_start > current_target_time * 1000) {
+    // Check if the 'run' has reached the targed time
+    if (dtime - current_time_start >= current_target_time * 1000) {
       nx_send("udelete 1024");
       nx_send("results.n_dist%d_final.txt=\"%.3f\"", n_run, current_dist);
       nx_send("results.n_time%d_final.txt=\"%.3f\"", n_run, current_time);
