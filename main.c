@@ -135,9 +135,11 @@ int read_analog(uint8_t chan) {
 float read_vbat() {
   int adc = read_analog(0);
   int adc_vref = read_analog(0x0E);
+
+  // Calculate vref based on the analog reference
   float vref = (1.1 * 1024.0) / (float)adc_vref;
   float vbat = ((float)adc * vref) / 1024.0;
-  return vbat * 2;
+  return vbat * 3;  // Resistors have ratio of 1/3
 }
 
 // Update status page on the nextion display
@@ -155,8 +157,7 @@ void update_status() {
   nx_send("status.n_d_curr.txt=\"%.3f\"", current_dist);
   nx_send("status.n_d_targ.txt=\"%.3f\"", current_target_dist);
   uint8_t progress = (current_time / current_target_time) * 100;
-  if (progress >= 100) 
-    progress = 100;
+  if (progress > 100) progress = 100;
 
   nx_send("status.n_progress.val=%d", progress);
 
@@ -247,7 +248,7 @@ void update_vars() {
   
   current_speed = current_rpm * WHEEL_CIRC;
   current_accel = (current_speed - delta_speed) / (float)((dtime_now - update_timer) / 1000.0);
-  current_dist = WHEEL_CIRC * (rev_counter / N_PULSES) * (1.0 / 4.0);
+  current_dist = WHEEL_CIRC * (rev_counter / N_PULSES) * (1.0 / 4.0); // Multiplied by 1/4 for the gear ratio
 
   delta_rev_count = rev_counter;
 }
@@ -270,8 +271,7 @@ int main(void) {
 
   // Configuration of registers
   // PWM pins stetup
-  DDRD |= (DDD1 << PD5) | (DDD1 << PD6);
-  PORTD |= (1 << PD5) | (1 << PD6);
+  DDRD |= (1 << PD5) | (1 << PD6);
 
   // PWM timer/counter setup
   TCCR0A |= (1 << COM0A1) | (1 << COM0B1);
