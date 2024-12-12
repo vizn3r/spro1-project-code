@@ -69,9 +69,9 @@ uint8_t n_run = 0;// n of 'run'
 
 // PID variables
 
-float kp = 0.2;         // Proportional term
-float ki = 0.000002;    // Integral term
-float kd = 0.0025;      // Derivation term
+float kp = 0.3;         // Proportional term
+float ki = 0.0000025;    // Integral term
+float kd = 0.01;      // Derivation term
 
 float pid_err = 0;      // Error calculated from the difference between rpm_avg and the req_rpm
 float pid_err_prev = 0; // Previous iteration error
@@ -122,9 +122,7 @@ void get_time_dist(void) {
 
 // Read analog channel (pin)
 int read_analog(uint8_t chan) {
-  ADMUX = (ADMUX & 0xF8) | (chan & 0x0F);
-  ADCSRA |= (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
-
+  ADMUX = (ADMUX & 0xF8) | (chan & 0x07);
   ADCSRA |= (1 << ADSC);
   while (ADCSRA & (1 << ADSC));
   return ADC;
@@ -134,12 +132,7 @@ int read_analog(uint8_t chan) {
 // Might be wrong, not tested yet
 float read_vbat() {
   int adc = read_analog(0);
-  int adc_vref = read_analog(0x0E);
-
-  // Calculate vref based on the analog reference
-  float vref = (1.1 * 1024.0) / (float)adc_vref;
-  float vbat = ((float)adc * vref) / 1024.0;
-  return vbat * 3;  // Resistors have ratio of 1/3
+  return (adc * 5.0) / 1024;
 }
 
 // Update status page on the nextion display
@@ -244,13 +237,15 @@ void pid_regulate() {
 // Update running variables
 void update_vars() {
   current_rpm = 60 * (rev_counter - delta_rev_count) / (float)(N_PULSES * ((dtime_now - update_timer) / 1000.0));
+  current_rpm*= 1.0 / 4.0;
   rpm_avg = rpm_avg + ((current_rpm - rpm_avg) / ++rpm_avg_counter);
   
-  current_speed = current_rpm * WHEEL_CIRC;
+  current_speed = (current_rpm / 60) * WHEEL_CIRC;
   current_accel = (current_speed - delta_speed) / (float)((dtime_now - update_timer) / 1000.0);
-  current_dist = WHEEL_CIRC * (rev_counter / N_PULSES) * (1.0 / 4.0); // Multiplied by 1/4 for the gear ratio
+  current_dist = WHEEL_CIRC * (rev_counter / N_PULSES) * (1.0 / 16.0); // Multiplied by 1/16 for the gear ratio
 
   delta_rev_count = rev_counter;
+  delta_speed = current_speed;
 }
 
 // Interrupt function that runs every time the state of PD2 changes
@@ -287,7 +282,7 @@ int main(void) {
   OCR1A = OCR1A_VAL;
  
   // Optical encoder data pin for external interrupt setup
-  DDRD &= ~(1 << PD2);
+  //DDRD &= ~(1 << PD2);
   EICRA |= (1 << ISC01);
   EIMSK |= (1 << INT0);
 
@@ -295,7 +290,9 @@ int main(void) {
   sei();
 
   // Analog pin for battery voltage
-  DDRC &= ~(1 << PC0);
+  DDRC |= (1 << PC0);
+  ADCSRA |= (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+  ADMUX |= (1 << REFS0);
 
   // Setup the start button on the setup page to execute the start() function if released
   nx_on_release(0x06, 0x01, start);
@@ -310,15 +307,15 @@ int main(void) {
 
     // Update every 250ms
     if (dtime - update_timer >= 250) {
+      current_time = (dtime - current_time_start) / 1000.0;
+      update_status();
+
       dtime_now = dtime;
       update_vars();
       pid_regulate();
       update_timer = dtime;
     }
-
     // Update status constantly
-    current_time = (dtime - current_time_start) / 1000.0;
-    update_status();
 
     // Check if the 'run' has reached the targed time
     if (dtime - current_time_start >= current_target_time * 1000) {
@@ -327,6 +324,9 @@ int main(void) {
       nx_send("results.n_time%d_final.txt=\"%.3f\"", n_run, current_time);
       start_run();
     }
+  }
+  while(1) {
+    nx_check(NULL, 0);
   }
   return 0;
 }
